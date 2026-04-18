@@ -1,0 +1,18 @@
+morgen, tomorrow, morning
+heute, today
+gestern, yesterday
+abend, evening
+nacht, night
+heimatstadt, hometown, home town, birthplace
+geburtsort, hometown, birthplace, place of birth
+heimat, home, hometown
+geboren, born
+stadt, city, town
+haus, house, home
+wohnung, apartment, flat
+auto, car
+buch, book
+arbeit, work, job
+schule, school
+freund, friend
+familie, family

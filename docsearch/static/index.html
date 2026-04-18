@@ -1,0 +1,487 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>DE/EN Search</title>
+<style>
+  :root {
+    --bg: #0f172a; --panel: #111827; --card: #1f2937; --muted: #94a3b8;
+    --text: #e5e7eb; --accent: #38bdf8; --accent2: #a78bfa;
+    --good: #34d399; --bad: #f87171; --border: #334155;
+    --mark-primary: #facc15; --mark-equiv: #a78bfa;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font-family: -apple-system, Segoe UI, Roboto, sans-serif;
+    background: linear-gradient(180deg, #0b1220 0%, #0f172a 100%);
+    color: var(--text); min-height: 100vh;
+  }
+  header {
+    padding: 10px 16px; border-bottom: 1px solid var(--border);
+    display: flex; justify-content: space-between; align-items: center;
+    background: rgba(15,23,42,.7); backdrop-filter: blur(8px);
+    position: sticky; top: 0; z-index: 10;
+  }
+  header h1 { margin: 0; font-size: 16px; letter-spacing: .2px; }
+  header h1 span { color: var(--accent); }
+  .lang-pill { font-size: 11px; padding: 3px 10px; border-radius: 999px;
+               background: #1e293b; color: var(--muted); }
+  main { width: 100%; max-width: 100%; margin: 0; padding: 10px 14px 24px; }
+  .panel {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 8px; padding: 10px 12px; margin-bottom: 10px;
+  }
+  .panel h2 { margin: 0 0 8px; font-size: 12px;
+              text-transform: uppercase; letter-spacing: 1px;
+              color: var(--muted); display: flex; align-items: center; gap: 8px; }
+  .panel h2 .num {
+    display: inline-flex; width: 20px; height: 20px; border-radius: 50%;
+    background: var(--accent); color: #0b1220; justify-content: center;
+    align-items: center; font-weight: 700; font-size: 11px;
+  }
+  /* three-column results grid */
+  .results-grid {
+    display: grid; gap: 10px;
+    grid-template-columns: minmax(260px, 1fr) minmax(360px, 1.4fr) minmax(240px, .8fr);
+  }
+  @media (max-width: 1200px) {
+    .results-grid { grid-template-columns: 1fr; }
+  }
+  .results-grid > .panel { margin-bottom: 0; }
+  .results-grid .results { max-height: calc(100vh - 260px); overflow-y: auto; }
+  .results-grid .full-page { max-height: 280px; }
+  .results-grid table.counts-table { font-size: 12px; }
+  .results-grid table.counts-table th,
+  .results-grid table.counts-table td { padding: 5px 8px; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .row > * { flex: 1 1 180px; }
+  input[type="text"], input[type="file"], input[type="number"], select {
+    padding: 10px 12px; background: #0b1220; color: var(--text);
+    border: 1px solid var(--border); border-radius: 8px; font-size: 14px;
+    outline: none; width: 100%;
+  }
+  input[type="text"]:focus, select:focus { border-color: var(--accent); }
+  button {
+    padding: 10px 16px; border: 0; border-radius: 8px; cursor: pointer;
+    background: var(--accent); color: #0b1220; font-weight: 600;
+    font-size: 14px; transition: transform .05s, background .15s;
+  }
+  button:hover { background: #7dd3fc; }
+  button:active { transform: translateY(1px); }
+  button.secondary { background: var(--accent2); color: #1b1033; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .status {
+    font-size: 13px; color: var(--muted); margin-top: 10px; min-height: 18px;
+  }
+  .status.ok { color: var(--good); }
+  .status.err { color: var(--bad); }
+  .lang-group {
+    display: flex; gap: 8px; flex: 0 0 auto;
+  }
+  .lang-opt {
+    padding: 8px 14px; border-radius: 8px; background: #0b1220;
+    border: 1px solid var(--border); cursor: pointer; font-size: 13px;
+    color: var(--muted);
+  }
+  .lang-opt.active {
+    background: var(--accent); color: #0b1220; border-color: var(--accent);
+    font-weight: 600;
+  }
+  .meta {
+    display: flex; gap: 16px; flex-wrap: wrap; font-size: 12px;
+    color: var(--muted); margin: 4px 0 12px;
+  }
+  .meta b { color: var(--text); font-weight: 600; }
+  .chips { display: inline-flex; gap: 6px; flex-wrap: wrap; }
+  .chip {
+    font-size: 11px; padding: 2px 8px; border-radius: 999px;
+    background: #1e293b; color: var(--text); border: 1px solid var(--border);
+  }
+  .chip.de { background: #1e3a2f; color: #6ee7b7; border-color: #065f46; }
+  .chip.en { background: #1e3a8a22; color: #93c5fd; border-color: #1e40af; }
+  .chip.ent { background: #4c1d9522; color: #c4b5fd; border-color: #4c1d95; }
+  .results { display: grid; gap: 12px; }
+  .hit {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 10px; padding: 14px 16px;
+  }
+  .hit-head {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: 8px; gap: 12px; flex-wrap: wrap;
+  }
+  .page-tag {
+    font-size: 13px; font-weight: 700; color: var(--accent);
+  }
+  .counts { font-size: 12px; color: var(--muted); }
+  .counts b { color: var(--text); }
+  .bar {
+    height: 4px; background: #1e293b; border-radius: 3px; overflow: hidden;
+    margin-top: 6px; width: 160px;
+  }
+  .bar > span { display: block; height: 100%;
+                background: linear-gradient(90deg, var(--accent), var(--accent2)); }
+  .snippet {
+    font-size: 13px; line-height: 1.55; color: #cbd5e1;
+    background: #0b1220; padding: 8px 10px; border-radius: 6px;
+    border-left: 3px solid var(--accent); margin-top: 8px;
+  }
+  .snippet em { background: #facc1533; color: #fde68a; font-style: normal;
+                padding: 0 2px; border-radius: 2px; }
+  .full-page {
+    background: #0b1220; border: 1px solid var(--border); border-radius: 8px;
+    padding: 14px; margin-top: 10px; max-height: 420px; overflow-y: auto;
+    font-size: 13px; line-height: 1.6; white-space: pre-wrap;
+    word-break: break-word; color: #cbd5e1;
+  }
+  .full-page mark.primary {
+    background: #facc1544; color: #fde68a; padding: 1px 3px;
+    border-radius: 3px; font-weight: 600;
+  }
+  .full-page mark.equiv {
+    background: #a78bfa44; color: #ddd6fe; padding: 1px 3px;
+    border-radius: 3px; font-weight: 600;
+  }
+  .tab-row {
+    display: flex; gap: 8px; margin: 8px 0 4px; font-size: 12px;
+  }
+  .tab-row .tab {
+    padding: 4px 10px; border-radius: 999px; background: #1e293b;
+    color: var(--muted); cursor: pointer; user-select: none;
+  }
+  .tab-row .tab.active { background: var(--accent); color: #0b1220;
+                         font-weight: 600; }
+  .legend { font-size: 11px; color: var(--muted); }
+  .legend .sw {
+    display: inline-block; width: 10px; height: 10px; border-radius: 2px;
+    vertical-align: middle; margin: 0 4px 0 10px;
+  }
+  .legend .sw.p { background: var(--mark-primary); }
+  .legend .sw.e { background: var(--mark-equiv); }
+  table.counts-table {
+    width: 100%; border-collapse: collapse; font-size: 13px;
+  }
+  table.counts-table th, table.counts-table td {
+    padding: 8px 10px; border-bottom: 1px solid var(--border); text-align: left;
+  }
+  table.counts-table th {
+    color: var(--muted); font-weight: 600; text-transform: uppercase;
+    font-size: 11px; letter-spacing: .8px;
+  }
+  table.counts-table td:first-child { font-weight: 600; color: var(--accent); }
+  table.counts-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .empty { color: var(--muted); padding: 18px; text-align: center; }
+  .spinner {
+    display: inline-block; width: 14px; height: 14px; border: 2px solid #475569;
+    border-top-color: var(--accent); border-radius: 50%; margin-right: 6px;
+    animation: spin 0.7s linear infinite; vertical-align: -2px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  footer { text-align: center; color: var(--muted); font-size: 12px;
+           padding: 20px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🔍 <span>DE/EN Search</span> · Hybrid Keyword + Semantic</h1>
+  <span class="lang-pill">DE ↔ EN</span>
+</header>
+
+<main>
+  <section class="panel">
+    <h2>1. Upload document</h2>
+    <div class="row">
+      <input type="file" id="file" accept=".pdf,.docx,.txt" />
+      <input type="text" id="docId" placeholder="doc id (e.g. sample)" value="sample" />
+      <button id="btnIngest">Index</button>
+    </div>
+    <div class="status" id="ingestStatus"></div>
+  </section>
+
+  <section class="panel">
+    <h2>2. Search</h2>
+    <div class="row" style="align-items:flex-end">
+      <div style="flex:2 1 280px">
+        <label class="legend" style="display:block;margin-bottom:6px">Keyword / phrase</label>
+        <input type="text" id="query" placeholder='e.g. "morgen" or "hometown of Phil"' />
+      </div>
+      <div style="flex:0 0 auto">
+        <label class="legend" style="display:block;margin-bottom:6px">Query language</label>
+        <div class="lang-group" id="langGroup">
+          <div class="lang-opt active" data-lang="auto">Auto</div>
+          <div class="lang-opt" data-lang="de">German</div>
+          <div class="lang-opt" data-lang="en">English</div>
+        </div>
+      </div>
+      <div style="flex:0 0 100px">
+        <label class="legend" style="display:block;margin-bottom:6px">Top pages</label>
+        <input type="number" id="top" value="15" min="1" max="100" />
+      </div>
+      <button id="btnSearch" class="secondary" style="flex:0 0 auto">Search</button>
+    </div>
+    <div class="row" style="margin-top:10px; align-items:center">
+      <label style="display:flex; gap:8px; align-items:center; flex:0 0 auto;
+                    font-size:13px; color:var(--muted); cursor:pointer">
+        <input type="checkbox" id="useLLM" checked />
+        Use DeepSeek (Ollama) for expansion · re-ranking · explanations
+      </label>
+      <span class="lang-pill" id="llmStatus" style="flex:0 0 auto">LLM: unknown</span>
+    </div>
+    <div class="status" id="searchStatus"></div>
+  </section>
+
+  <section class="panel" id="expandedPanel" style="display:none">
+    <h2>Query expansion</h2>
+    <div class="meta" id="expandedMeta"></div>
+  </section>
+
+  <div class="results-grid" id="resultsGrid" style="display:none">
+    <!-- SECTION A: ranked results with snippets -->
+    <section class="panel" id="sectionA">
+      <h2><span class="num">1</span> Ranked results</h2>
+      <div id="resultsPanel" class="results"></div>
+    </section>
+
+    <!-- SECTION B: top 5 full-page views -->
+    <section class="panel" id="sectionB">
+      <h2><span class="num">2</span> Top 5 — full page text</h2>
+      <div class="legend">
+        <span class="sw p"></span>primary
+        <span class="sw e"></span>equivalent
+      </div>
+      <div id="fullPanel" class="results" style="margin-top:8px; max-height: calc(100vh - 260px); overflow-y: auto"></div>
+    </section>
+
+    <!-- SECTION C: page counts only -->
+    <section class="panel" id="sectionC">
+      <h2><span class="num">3</span> Page counts (EN / DE)</h2>
+      <div style="max-height: calc(100vh - 260px); overflow-y: auto">
+        <table class="counts-table">
+          <thead>
+            <tr><th>Page</th><th class="num">M</th>
+                <th class="num">DE</th><th class="num">EN</th></tr>
+          </thead>
+          <tbody id="countsBody"></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+</main>
+
+<footer>Hybrid BM25 + multilingual embeddings · FAISS · FastAPI</footer>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const setStatus = (el, msg, cls="") => {
+  el.className = "status " + cls;
+  el.innerHTML = msg;
+};
+
+// Language selector
+let selectedLang = "auto";
+document.querySelectorAll("#langGroup .lang-opt").forEach(el => {
+  el.addEventListener("click", () => {
+    document.querySelectorAll("#langGroup .lang-opt").forEach(x => x.classList.remove("active"));
+    el.classList.add("active");
+    selectedLang = el.dataset.lang;
+  });
+});
+
+$("btnIngest").addEventListener("click", async () => {
+  const f = $("file").files[0];
+  const docId = $("docId").value.trim() || "doc";
+  if (!f) { setStatus($("ingestStatus"), "Pick a file first.", "err"); return; }
+  const fd = new FormData();
+  fd.append("file", f);
+  fd.append("doc_id", docId);
+  fd.append("recreate", "false");
+  setStatus($("ingestStatus"), '<span class="spinner"></span>Indexing — this can take a minute for large PDFs…');
+  $("btnIngest").disabled = true;
+  try {
+    const r = await fetch("/ingest", { method: "POST", body: fd });
+    if (!r.ok) throw new Error(await r.text());
+    const j = await r.json();
+    setStatus($("ingestStatus"), `✅ Indexed <b>${j.chunks}</b> chunks from <b>${j.doc_id}</b>.`, "ok");
+  } catch (e) {
+    setStatus($("ingestStatus"), "❌ " + e.message, "err");
+  } finally {
+    $("btnIngest").disabled = false;
+  }
+});
+
+$("btnSearch").addEventListener("click", runSearch);
+$("query").addEventListener("keydown", (e) => { if (e.key === "Enter") runSearch(); });
+
+async function runSearch() {
+  const q = $("query").value.trim();
+  const top = parseInt($("top").value) || 15;
+  if (!q) { setStatus($("searchStatus"), "Enter a query.", "err"); return; }
+  setStatus($("searchStatus"), '<span class="spinner"></span>Searching…');
+  $("resultsGrid").style.display = "none";
+  $("expandedPanel").style.display = "none";
+  try {
+    const useLLM = $("useLLM").checked ? "true" : "false";
+    const r = await fetch(
+      `/search?q=${encodeURIComponent(q)}&top=${top}`
+      + `&lang=${selectedLang}&use_llm=${useLLM}`
+    );
+    if (!r.ok) throw new Error(await r.text());
+    const j = await r.json();
+    renderLLMStatus(j.llm);
+    renderExpanded(j.expanded, j.lang_hint);
+    renderRanked(j.pages || []);
+    renderFull(j.top_full || []);
+    renderCounts(j.page_counts || []);
+    const llm = j.llm || {};
+    const llmNote = llm.available
+      ? ` · LLM <b>${llm.model || ""}</b> ` +
+        `(expand: ${llm.query_expansion_used ? "✓" : "—"}, ` +
+        `rerank: ${llm.rerank_used ? "✓" : "—"}, ` +
+        `explain: ${llm.explain_used ? "✓" : "—"})`
+      : " · LLM off";
+    setStatus($("searchStatus"),
+      `Found <b>${(j.pages || []).length}</b> pages. `
+      + `Language: <b>${selectedLang}</b>.${llmNote}`,
+      "ok");
+  } catch (e) {
+    setStatus($("searchStatus"), "❌ " + e.message, "err");
+  }
+}
+
+function renderLLMStatus(llm) {
+  const el = $("llmStatus");
+  if (!llm) { el.textContent = "LLM: unknown"; return; }
+  if (!llm.enabled)       { el.textContent = "LLM: off";       el.style.color = "#94a3b8"; return; }
+  if (!llm.available)     { el.textContent = "LLM: unreachable"; el.style.color = "#f87171"; return; }
+  el.textContent = `LLM: ${llm.model}`; el.style.color = "#34d399";
+}
+
+function renderExpanded(eq, hint) {
+  if (!eq) return;
+  $("expandedPanel").style.display = "block";
+  const parts = [];
+  parts.push(`<span><b>Detected:</b></span> <span class="chip ${eq.lang}">${eq.lang || "?"}</span>`);
+  if (hint && hint !== "auto")
+    parts.push(`<span><b>Forced:</b></span> <span class="chip ${hint}">${hint}</span>`);
+  if (eq.translated)
+    parts.push(`<span><b>Equivalent:</b></span> <span class="chip">${escapeHtml(eq.translated)}</span>`);
+  if (eq.terms?.length)
+    parts.push(`<span><b>Terms:</b></span> <span class="chips">${eq.terms.map(t => `<span class="chip">${escapeHtml(t)}</span>`).join("")}</span>`);
+  if (eq.synonyms?.length)
+    parts.push(`<span><b>Synonyms:</b></span> <span class="chips">${eq.synonyms.map(t => `<span class="chip">${escapeHtml(t)}</span>`).join("")}</span>`);
+  if (eq.entities?.length)
+    parts.push(`<span><b>Entities:</b></span> <span class="chips">${eq.entities.map(t => `<span class="chip ent">${escapeHtml(t)}</span>`).join("")}</span>`);
+  if (eq.paraphrases?.length)
+    parts.push(`<span><b>LLM paraphrases:</b></span> <span class="chips">${eq.paraphrases.map(t => `<span class="chip ent">${escapeHtml(t)}</span>`).join("")}</span>`);
+  if (eq.llm_used)
+    parts.push(`<span class="chip ent">🧠 expanded by LLM</span>`);
+  $("expandedMeta").innerHTML = parts.join(" &nbsp; ");
+}
+
+function renderRanked(pages) {
+  const host = $("resultsPanel");
+  $("resultsGrid").style.display = "grid";
+  if (!pages.length) {
+    host.innerHTML = '<div class="empty">No matching pages.</div>';
+    return;
+  }
+  const maxScore = Math.max(...pages.map(p => p.score || 0), 0.0001);
+  host.innerHTML = pages.map(p => {
+    const snippets = (p.snippets || []).map(s =>
+      `<div class="snippet">${sanitizeSnippet(s)}</div>`
+    ).join("");
+    const bar = Math.round((p.score / maxScore) * 100);
+    return `
+      <div class="hit">
+        <div class="hit-head">
+          <div>
+            <div class="page-tag">Page ${p.page}</div>
+            <div class="counts">
+              <b>${p.mentions}</b> mentions
+              · <span class="chip de">DE ${p.de}</span>
+              · <span class="chip en">EN ${p.en}</span>
+              · score <b>${(p.score || 0).toFixed(3)}</b>
+            </div>
+            <div class="bar"><span style="width:${bar}%"></span></div>
+          </div>
+        </div>
+        ${snippets}
+      </div>`;
+  }).join("");
+}
+
+function renderFull(items) {
+  const host = $("fullPanel");
+  if (!items.length) {
+    host.innerHTML = '<div class="empty">No top pages.</div>';
+    return;
+  }
+  host.innerHTML = items.map((p, i) => {
+    const primaryHTML = p.primary_hits || "";
+    const equivHTML = p.equivalent_hits || "";
+    const id = `full-${i}`;
+    const llmBadge = (p.llm_score != null)
+      ? ` · <span class="chip ent">LLM ${p.llm_score.toFixed(2)}</span>` : "";
+    const explain = p.explanation
+      ? `<div class="snippet" style="border-left-color:var(--accent2)">
+           <b>🧠 Why this page:</b> ${escapeHtml(p.explanation)}
+         </div>` : "";
+    return `
+      <div class="hit">
+        <div class="hit-head">
+          <div class="page-tag">Page ${p.page}</div>
+          <div class="counts">
+            <b>${p.mentions}</b> mentions
+            · <span class="chip de">DE ${p.de}</span>
+            · <span class="chip en">EN ${p.en}</span>
+            · score <b>${(p.score || 0).toFixed(3)}</b>${llmBadge}
+          </div>
+        </div>
+        ${explain}
+        <div class="tab-row">
+          <div class="tab active" data-tab="primary" data-id="${id}">Primary language</div>
+          <div class="tab" data-tab="equiv" data-id="${id}">Cross-lingual equivalent</div>
+        </div>
+        <div class="full-page" id="${id}-primary">${primaryHTML || '<span class="empty">no text</span>'}</div>
+        <div class="full-page" id="${id}-equiv" style="display:none">${equivHTML || '<span class="empty">no text</span>'}</div>
+      </div>`;
+  }).join("");
+
+  host.querySelectorAll(".tab").forEach(t => {
+    t.addEventListener("click", () => {
+      const id = t.dataset.id;
+      const which = t.dataset.tab;
+      t.parentElement.querySelectorAll(".tab").forEach(x => x.classList.remove("active"));
+      t.classList.add("active");
+      $(id + "-primary").style.display = which === "primary" ? "block" : "none";
+      $(id + "-equiv").style.display = which === "equiv" ? "block" : "none";
+    });
+  });
+}
+
+function renderCounts(rows) {
+  const tbody = $("countsBody");
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="4" class="empty">No pages.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = rows.map(r => `
+    <tr>
+      <td>Page ${r.page}</td>
+      <td class="num">${r.mentions}</td>
+      <td class="num">${r.de}</td>
+      <td class="num">${r.en}</td>
+    </tr>`).join("");
+}
+
+// Snippets come from BM25 highlighter with <em> tags — keep those only.
+function sanitizeSnippet(html) {
+  return String(html).replace(/<(?!\/?em\b)[^>]*>/gi, "");
+}
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g,
+    c => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[c]));
+}
+</script>
+</body>
+</html>
