@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from .pipeline import DocSearch
-from . import output_log
+from . import output_log, db
 
 app = FastAPI(title="DE/EN Search")
 
@@ -47,7 +47,8 @@ async def ingest(file: UploadFile = File(...), doc_id: str = Form(...),
         tmp.write(await file.read())
         tmp_path = tmp.name
     try:
-        n = _get().ingest(tmp_path, doc_id, recreate=recreate)
+        n = _get().ingest(tmp_path, doc_id, recreate=recreate,
+                          filename=file.filename)
         return {"doc_id": doc_id, "chunks": n}
     finally:
         Path(tmp_path).unlink(missing_ok=True)
@@ -73,6 +74,16 @@ def search(q: str, top: int = 20, lang: str = "auto", use_llm: bool = True):
         ds.llm = None
         ds.qx._llm = None
     return JSONResponse(ds.search(q, top_pages=top, lang_hint=lang))
+
+
+@app.get("/docs-db")
+def list_docs():
+    return {"documents": db.list_documents()}
+
+
+@app.get("/logs")
+def list_logs(doc_id: Optional[str] = None, limit: int = 100):
+    return {"logs": db.list_logs(doc_id=doc_id, limit=limit)}
 
 
 @app.get("/healthz")

@@ -15,7 +15,22 @@ from .ranker import chunk_scores, aggregate_pages, proximity_score
 from .synonyms import expand_term, classify
 from .llm import Ollama
 from . import output_log
+from . import db
 from datetime import datetime
+import hashlib
+import time
+
+
+def _file_sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _safe(s: str) -> str:
+    return re.sub(r"[^\w\-]+", "_", s or "").strip("_") or "doc"
 
 
 def _html_escape(s: str) -> str:
@@ -72,6 +87,7 @@ class DocSearch:
         self.llm = Ollama() if self.use_llm else None
 
         self.pages: Dict[int, str] = {}
+        self.doc_id: Optional[str] = None
         self.es = None
         if self.use_es:
             try:
@@ -89,10 +105,42 @@ class DocSearch:
         self._bm25_tokens: List[List[str]] = []
 
     # ------------------------------------------------------------------ ingest
-    def ingest(self, path: str, doc_id: str, recreate: bool = False) -> int:
+    def ingest(self, path: str, doc_id: str, recreate: bool = False,
+               filename: Optional[str] = None) -> int:
+        path = Path(path)
+        filename = filename or path.name
+        file_hash = _file_sha256(path)
+
+        # Memoization: identical file content → reuse existing artefacts.
+        existing = db.find_by_hash(file_hash)
+        if existing and not recreate:
+            if (Path(existing["chunks_path"]).exists()
+                    and Path(existing["faiss_path"]).exists()):
+                print(f"[cache] file hash {file_hash[:12]} already indexed "
+                      f"as doc_id='{existing['doc_id']}' — reusing.")
+                self._load_from_record(existing)
+                # Re-register under the new doc_id if different, but share paths.
+                if existing["doc_id"] != doc_id:
+                    rec = dict(existing)
+                    rec["doc_id"] = doc_id
+                    rec["filename"] = filename
+                    rec["ingested_at"] = datetime.utcnow().isoformat() + "Z"
+                    db.upsert_document(rec)
+                self.doc_id = doc_id
+                return existing["num_chunks"]
+
+        # Per-doc on-disk layout so multiple documents can coexist.
+        base = Path(CFG.chunks_path).parent / "docs" / _safe(doc_id)
+        base.mkdir(parents=True, exist_ok=True)
+        chunks_path = base / "chunks.pkl"
+        pages_path = base / "pages.pkl"
+        faiss_path = base / "faiss.index"
+        faiss_meta = base / "faiss_meta.pkl"
+
+        # Parse + chunk
         all_chunks: List[Chunk] = []
         pages: Dict[int, str] = {}
-        for page_no, text in parse(Path(path)):
+        for page_no, text in parse(path):
             pages[page_no] = (pages.get(page_no, "") + "\n" + (text or "")).strip()
             all_chunks.extend(chunk_page(doc_id, page_no, text,
                                          CFG.chunk_tokens, CFG.chunk_overlap))
@@ -100,33 +148,96 @@ class DocSearch:
             print("[warn] no chunks extracted")
             return 0
 
+        # Embed
         texts = [c.text for c in all_chunks]
         print(f"[info] embedding {len(texts)} chunks with {CFG.embed_model}")
         vecs = self.emb.encode(texts, batch_size=32)
 
+        # Elasticsearch
         if self.use_es and self.es is not None:
             if recreate:
                 self.es.ensure_index(recreate=True)
             self.es.bulk_index(all_chunks, vecs)
 
+        # FAISS (per-doc)
         self.faiss = FaissIndex(self.emb.dim)
         meta = [{"chunk_id": c.chunk_id, "page_no": c.page_no,
                  "lang": c.lang, "tokens": c.tokens, "text": c.text,
                  "entities": c.entities, "lemma": c.lemma}
                 for c in all_chunks]
         self.faiss.add(vecs, meta)
+        self.faiss.save(path=str(faiss_path), meta_path=str(faiss_meta))
+        # Also write canonical paths for the "last ingested" fallback loader.
         self.faiss.save()
 
+        # Persist chunks + pages (per-doc + legacy canonical copies)
         self.chunks = all_chunks
         self.pages = pages
         Path(CFG.chunks_path).parent.mkdir(parents=True, exist_ok=True)
+        with open(chunks_path, "wb") as f:
+            pickle.dump(all_chunks, f)
+        with open(pages_path, "wb") as f:
+            pickle.dump(pages, f)
         with open(CFG.chunks_path, "wb") as f:
             pickle.dump(all_chunks, f)
         with open(CFG.pages_path, "wb") as f:
             pickle.dump(pages, f)
 
         self._build_bm25()
+
+        # Ingest manifest + DB row
+        ingested_at = datetime.utcnow().isoformat() + "Z"
+        manifest = {
+            "doc_id": doc_id,
+            "filename": filename,
+            "file_hash": file_hash,
+            "file_size": path.stat().st_size,
+            "ingested_at": ingested_at,
+            "embed_model": CFG.embed_model,
+            "num_pages": len(pages),
+            "num_chunks": len(all_chunks),
+            "chunks_path": str(chunks_path),
+            "pages_path": str(pages_path),
+            "faiss_path": str(faiss_path),
+            "faiss_meta_path": str(faiss_meta),
+            "chunks": [
+                {"chunk_id": c.chunk_id, "page_no": c.page_no,
+                 "lang": c.lang, "num_tokens": len(c.tokens),
+                 "entities": c.entities,
+                 "text_preview": c.text[:180]}
+                for c in all_chunks
+            ],
+        }
+        manifest_path = output_log.write_ingest_manifest(doc_id, manifest)
+        db.upsert_document({
+            "doc_id": doc_id, "filename": filename, "file_hash": file_hash,
+            "file_size": path.stat().st_size,
+            "num_pages": len(pages), "num_chunks": len(all_chunks),
+            "embed_model": CFG.embed_model, "ingested_at": ingested_at,
+            "chunks_path": str(chunks_path), "pages_path": str(pages_path),
+            "faiss_path": str(faiss_path),
+            "faiss_meta_path": str(faiss_meta),
+            "manifest_path": manifest_path,
+        })
+        self.doc_id = doc_id
+        print(f"[info] indexed doc_id='{doc_id}' ({len(all_chunks)} chunks); "
+              f"manifest: {manifest_path}")
         return len(all_chunks)
+
+    def _load_from_record(self, rec: Dict) -> None:
+        """Rehydrate chunks/pages/faiss from the per-doc paths in a DB row."""
+        with open(rec["chunks_path"], "rb") as f:
+            self.chunks = pickle.load(f)
+        if rec.get("pages_path") and Path(rec["pages_path"]).exists():
+            with open(rec["pages_path"], "rb") as f:
+                self.pages = pickle.load(f)
+        self.faiss = FaissIndex.load(
+            self.emb.dim,
+            path=rec["faiss_path"],
+            meta_path=rec["faiss_meta_path"],
+        )
+        self.doc_id = rec.get("doc_id")
+        self._build_bm25()
 
     def load(self):
         if not Path(CFG.chunks_path).exists():
@@ -188,6 +299,7 @@ class DocSearch:
         if self.faiss is None:
             self.load()
 
+        t_start = time.time()
         eq = self.qx.expand(query)
         if not eq.raw:
             return {"query": query, "expanded": eq.as_dict(),
@@ -361,7 +473,7 @@ class DocSearch:
              "lang": v["src"].get("lang")}
             for k, v in vec_hits.items()
         ]
-        output_log.write_elastic(es_raw_dump)
+        elastic_archive = output_log.write_elastic(es_raw_dump)
 
         result = {
             "query": query,
@@ -380,14 +492,31 @@ class DocSearch:
                 "query_expansion_used": eq.llm_used,
             },
         }
-        output_log.append_session({
+        top_pages_summary = [
+            {"page": p["page"], "mentions": p["mentions"],
+             "de": p["de"], "en": p["en"], "score": p["score"]}
+            for p in pages_out[:10]
+        ]
+        session_archive = output_log.append_session({
             "query": query, "lang_hint": lang_hint,
             "timestamp": result["timestamp"],
-            "top_pages": [
-                {"page": p["page"], "mentions": p["mentions"],
-                 "de": p["de"], "en": p["en"], "score": p["score"]}
-                for p in pages_out[:10]
-            ],
+            "doc_id": self.doc_id,
+            "top_pages": top_pages_summary,
             "llm": result["llm"],
         })
+        duration_ms = int((time.time() - t_start) * 1000)
+        db.log_search({
+            "doc_id": self.doc_id,
+            "query": query,
+            "lang_hint": lang_hint,
+            "use_llm": self.use_llm,
+            "num_pages": len(pages_out),
+            "timestamp": result["timestamp"],
+            "duration_ms": duration_ms,
+            "session_json": session_archive,
+            "elastic_json": elastic_archive,
+            "top_pages": top_pages_summary,
+            "llm_flags": result["llm"],
+        })
+        result["duration_ms"] = duration_ms
         return result

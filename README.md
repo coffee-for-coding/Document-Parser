@@ -22,6 +22,7 @@ expansion, re-ranking, and explanations.
 - [Configuration](#configuration)
 - [Architecture](#architecture)
 - [Output files](#output-files)
+- [Persistence & databases](#persistence--databases)
 - [Scoring formula](#scoring-formula)
 - [Performance benchmarks](#performance-benchmarks)
 - [Docker](#docker)
@@ -46,7 +47,12 @@ expansion, re-ranking, and explanations.
 - **Three-pane UI** — ranked results, top-5 full page text with highlights
   (primary + cross-lingual equivalent), and a compact per-page counts table.
 - **Session logging** — every search is captured to JSON files that reset
-  on server restart.
+  on server restart, plus timestamped archives under `data/sessions/` and
+  `data/elastic/` that survive restarts.
+- **SQLite persistence + memoization** — `inputs.db` tracks every ingested
+  document by SHA-256 hash; re-uploading the same file skips parse/embed
+  and reuses the cached chunks + FAISS index. `outputs.db` logs every
+  search with pointers back to its archived JSON.
 
 ---
 
@@ -397,19 +403,126 @@ The three ★ are the only places the LLM is invoked.
 
 ## Output files
 
-Two JSON artefacts land in `./data/` per server session:
+Everything that the app writes lives under `./data/`.
 
-| File | Lifetime | Contents |
-|---|---|---|
-| `session_output.json` | Process — reset to `[]` on every server start | Appends `{query, timestamp, top_pages, llm}` per search. |
-| `elastic_output.json` | Per iteration — overwritten every search | Raw BM25 + vector hit lists, ES host, index, mode. |
+### Live (session-scoped — reset on every server start)
+
+| File | Contents |
+|---|---|
+| `data/session_output.json` | Array appended with `{query, timestamp, doc_id, top_pages, llm}` for every search this run. |
+| `data/elastic_output.json` | Overwritten each search with the raw BM25 + vector hit lists, ES host/index, and `mode` (`elasticsearch` or `in-memory-bm25`). |
 
 When Elasticsearch isn't available, `elastic_output.json` still captures the
 in-memory BM25 hits under `"mode": "in-memory-bm25"` so the contract is
 identical.
 
-Both files are recreated fresh at server startup — nothing leaks across
-process restarts.
+### Per-event archives (never reset — grow over time)
+
+Every ingest and every search also writes a timestamped copy so the full
+history survives restarts.
+
+| Directory | Filename pattern | Contents |
+|---|---|---|
+| `data/sessions/` | `<utc-ts>__<query-slug>.json` | One file per search (same shape as a `session_output.json` row). |
+| `data/elastic/`  | `<utc-ts>__<query-slug>.json` | One file per search — raw BM25 + vector hits. |
+| `data/ingests/`  | `<doc-id>__<utc-ts>.json` | One manifest per ingest — file hash, size, chunk metadata (chunk_id, page_no, lang, entities, text preview), pointers to on-disk artefacts. |
+
+### Per-document artefacts (reused across ingests of the same file)
+
+| Path | Contents |
+|---|---|
+| `data/docs/<safe_doc_id>/chunks.pkl` | Pickled list of `Chunk` dataclasses. |
+| `data/docs/<safe_doc_id>/pages.pkl` | Pickled `{page_no: page_text}` dict. |
+| `data/docs/<safe_doc_id>/faiss.index` | FAISS cosine index for this doc. |
+| `data/docs/<safe_doc_id>/faiss_meta.pkl` | Per-vector metadata (chunk_id, page_no, lang, entities). |
+| `data/chunks.pkl`, `data/pages.pkl`, `data/faiss.index`, `data/faiss_meta.pkl` | Legacy canonical copies of the **last-ingested** doc — used by the fallback loader on server start. |
+
+---
+
+## Persistence & databases
+
+A pair of SQLite databases tie everything above together.
+
+### `data/db/inputs.db` — one row per ingested document
+
+Table `documents` — primary key `doc_id`, indexed `file_hash`.
+
+| Column | Notes |
+|---|---|
+| `doc_id` | Primary key — user-supplied logical id. |
+| `filename` | Original uploaded filename. |
+| `file_hash` | SHA-256 of the file bytes. **Indexed** — used for memoization. |
+| `file_size`, `num_pages`, `num_chunks` | Summary stats. |
+| `embed_model` | Model that produced the vectors (so stale indexes can be detected). |
+| `ingested_at` | UTC ISO timestamp. |
+| `chunks_path`, `pages_path`, `faiss_path`, `faiss_meta_path` | Pointers into `data/docs/<doc_id>/…`. |
+| `manifest_path` | Pointer to the `data/ingests/…json` manifest. |
+
+**Memoization:** on every `POST /ingest`, the SHA-256 is computed and looked
+up in `documents`. If the file has been seen before **and** the on-disk
+artefacts still exist, the parse/embed/index steps are skipped entirely and
+the cached chunks/FAISS are reused. A second ingest of the same file under
+a different `doc_id` registers a new row that points at the same artefacts.
+
+Force a rebuild with `recreate=true` (REST) or `--recreate` (CLI).
+
+### `data/db/outputs.db` — one row per search
+
+Table `search_logs` — auto-increment `log_id`, foreign key `doc_id`.
+
+| Column | Notes |
+|---|---|
+| `log_id` | Auto-increment PK. |
+| `doc_id` | Which document was queried. |
+| `query`, `lang_hint`, `use_llm`, `num_pages` | Request parameters. |
+| `timestamp`, `duration_ms` | UTC ISO + measured wall-clock. |
+| `session_json` | Absolute path to the archived `data/sessions/…json`. |
+| `elastic_json` | Absolute path to the archived `data/elastic/…json`. |
+| `top_pages` | JSON string — compact top-10 summary. |
+| `llm_flags` | JSON string — `{enabled, available, model, rerank_used, explain_used, query_expansion_used}`. |
+
+Because every log row stores the JSON-archive paths, you can replay any
+historical search by reading the referenced file — nothing is lost even
+across server restarts.
+
+### Browsing the DBs
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /docs-db` | JSON listing of all ingested documents. |
+| `GET /logs?doc_id=…&limit=…` | JSON listing of search logs (optionally filtered by `doc_id`). |
+
+For ad-hoc queries, open the `.db` files with any SQLite browser (e.g.
+DB Browser for SQLite) or:
+
+```bash
+sqlite3 data/db/inputs.db  ".schema documents"
+sqlite3 data/db/outputs.db "SELECT log_id,doc_id,query,duration_ms FROM search_logs ORDER BY log_id DESC LIMIT 20;"
+```
+
+### Directory tree summary
+
+```
+data/
+├── session_output.json       # live, reset each server start
+├── elastic_output.json       # live, overwritten each search
+├── sessions/                 # archive — one file per search
+├── elastic/                  # archive — one file per search
+├── ingests/                  # archive — one manifest per ingest
+├── docs/<safe_doc_id>/       # per-doc chunks/pages/faiss (memoized)
+│   ├── chunks.pkl
+│   ├── pages.pkl
+│   ├── faiss.index
+│   └── faiss_meta.pkl
+├── chunks.pkl  pages.pkl     # legacy canonical copies (last ingest)
+├── faiss.index  faiss_meta.pkl
+└── db/
+    ├── inputs.db             # documents table (PK doc_id)
+    └── outputs.db            # search_logs table (FK doc_id)
+```
+
+Everything under `data/` is in `.gitignore` — regenerated from the source
+files on demand.
 
 ---
 
@@ -513,8 +626,9 @@ docsearch/
 ├── query.py           # query expansion (terms, synonyms, MT, LLM★, NER)
 ├── ranker.py          # proximity, weighted hybrid, page aggregation
 ├── llm.py             # Ollama client — the 3 LLM integration points
-├── output_log.py      # session + elastic JSON writers
-├── pipeline.py        # DocSearch orchestrator
+├── output_log.py      # session + elastic + ingest archive writers
+├── db.py              # SQLite (inputs.db + outputs.db) persistence
+├── pipeline.py        # DocSearch orchestrator (hash-memoized ingest)
 ├── cli.py             # `python -m docsearch.cli ...`
 ├── server.py          # FastAPI app
 └── static/
